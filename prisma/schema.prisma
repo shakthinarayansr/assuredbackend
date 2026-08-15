@@ -1,0 +1,551 @@
+// AssuredGig backend — physical schema.
+// Derived from Backend TRD §5. Money is integer paise, never a float (BR-01).
+// State is a projection of BookingEvent; BookingEvent rows are never updated.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum WorkerStatus {
+  PENDING_VETTING
+  VETTED
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum DocumentType {
+  AADHAAR
+  PAN
+  BANK_PROOF
+  POLICE_VERIFICATION
+  OTHER
+}
+
+enum DocumentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum RequirementStatus {
+  DRAFT
+  OPEN
+  FILLED
+  CANCELLED
+  COMPLETED
+}
+
+enum BookingStatus {
+  OFFERED
+  ACCEPTED
+  DECLINED
+  EXPIRED
+  CONFIRMED
+  CHECKED_IN
+  CHECKED_OUT
+  COMPLETED
+  NO_SHOW
+  CANCELLED_BY_WORKER
+  CANCELLED_BY_OPS
+  REPLACED
+}
+
+enum ActorType {
+  WORKER
+  OPS
+  SYSTEM
+}
+
+enum AttendanceKind {
+  CHECK_IN
+  CHECK_OUT
+}
+
+enum AttendanceVerdict {
+  ACCEPTED
+  REJECTED
+  PENDING_REVIEW
+}
+
+enum ConfirmationType {
+  DAY_BEFORE
+  MORNING_OF
+  PRE_SHIFT
+}
+
+enum ConfirmationChannel {
+  PUSH
+  WHATSAPP
+  SMS
+  IVR
+}
+
+enum ConfirmationResponse {
+  CONFIRMED
+  DECLINED
+  NO_RESPONSE
+}
+
+enum NotificationChannel {
+  PUSH
+  WHATSAPP
+  SMS
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+enum DisputeTarget {
+  ATTENDANCE
+  NO_SHOW
+  RELIABILITY_SCORE
+  PAY
+  OTHER
+}
+
+enum DisputeState {
+  OPEN
+  IN_REVIEW
+  RESOLVED_UPHELD
+  RESOLVED_OVERTURNED
+  REJECTED
+}
+
+enum OpsRole {
+  ADMIN
+  OPS
+  READ_ONLY
+}
+
+// ---------------------------------------------------------------------------
+// Workers and identity
+// ---------------------------------------------------------------------------
+
+model Worker {
+  id                String       @id @default(uuid()) @db.Uuid
+  phone             String       @unique
+  name              String?
+  status            WorkerStatus @default(PENDING_VETTING)
+  languagePref      String       @default("en")
+  profilePhotoKey   String?
+  // Home area — float lat/lng; distance is haversine in app code (TRD §5).
+  homeLat           Float?
+  homeLng           Float?
+  homeAreaLabel     String?
+  roles             String[]     @default([])
+  travelDistanceKm  Int          @default(10)
+  // Weekly availability template, ops- and worker-editable.
+  availability      Json?
+  // Denormalised read cache of the latest ReliabilityScore snapshot.
+  cachedScore       Int?
+  cachedScoreVersion String?
+  vettedAt          DateTime?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  documents      WorkerDocument[]
+  devices        Device[]
+  refreshTokens  RefreshToken[]
+  bookings       Booking[]
+  scores         ReliabilityScore[]
+  notifications  Notification[]
+  disputes       Dispute[]
+
+  @@index([status])
+  @@map("workers")
+}
+
+// [O] Only materialises under Register #4 branch B.
+model WorkerDocument {
+  id         String         @id @default(uuid()) @db.Uuid
+  workerId   String         @db.Uuid
+  type       DocumentType
+  objectKey  String
+  status     DocumentStatus @default(PENDING)
+  reviewedBy String?        @db.Uuid
+  reviewedAt DateTime?
+  note       String?
+  createdAt  DateTime       @default(now())
+
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@index([workerId, type])
+  @@map("worker_documents")
+}
+
+model Device {
+  id           String   @id @default(uuid()) @db.Uuid
+  workerId     String   @db.Uuid
+  deviceId     String
+  platform     String
+  pushToken    String?
+  lastSeenAt   DateTime @default(now())
+  createdAt    DateTime @default(now())
+
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@unique([workerId, deviceId])
+  @@index([pushToken])
+  @@map("devices")
+}
+
+// OTP is stored hashed with an attempt cap and short expiry (TRD §7).
+model OtpChallenge {
+  id         String   @id @default(uuid()) @db.Uuid
+  phone      String
+  codeHash   String
+  attempts   Int      @default(0)
+  consumedAt DateTime?
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+
+  @@index([phone, createdAt])
+  @@map("otp_challenges")
+}
+
+// Rotating, hashed, device-bound. Reuse of a rotated token revokes the family.
+model RefreshToken {
+  id          String   @id @default(uuid()) @db.Uuid
+  workerId    String   @db.Uuid
+  familyId    String   @db.Uuid
+  tokenHash   String   @unique
+  deviceId    String
+  replacedById String? @db.Uuid
+  revokedAt   DateTime?
+  revokedReason String?
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@index([workerId, familyId])
+  @@map("refresh_tokens")
+}
+
+model OpsUser {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  passwordHash String
+  totpSecret   String?
+  role         OpsRole  @default(OPS)
+  disabledAt   DateTime?
+  createdAt    DateTime @default(now())
+
+  @@map("ops_users")
+}
+
+// ---------------------------------------------------------------------------
+// Companies and requirements
+// ---------------------------------------------------------------------------
+
+model Company {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  locations CompanyLocation[]
+
+  @@map("companies")
+}
+
+model CompanyLocation {
+  id             String   @id @default(uuid()) @db.Uuid
+  companyId      String   @db.Uuid
+  name           String
+  addressLine    String?
+  // Geofence centre. Radius default lives in Config; this is the per-site override.
+  lat            Float
+  lng            Float
+  geofenceRadiusM Int?
+  createdAt      DateTime @default(now())
+
+  company      Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  requirements Requirement[]
+
+  @@index([companyId])
+  @@map("company_locations")
+}
+
+model Requirement {
+  id           String            @id @default(uuid()) @db.Uuid
+  locationId   String            @db.Uuid
+  role         String
+  startsAt     DateTime
+  endsAt       DateTime
+  headcount    Int
+  // Integer paise. No floats anywhere in money.
+  payPaise     Int
+  highValue    Boolean           @default(false)
+  status       RequirementStatus @default(DRAFT)
+  notes        String?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  location CompanyLocation @relation(fields: [locationId], references: [id])
+  bookings Booking[]
+
+  @@index([status, startsAt])
+  @@map("requirements")
+}
+
+// ---------------------------------------------------------------------------
+// Bookings — one seat, one worker
+// ---------------------------------------------------------------------------
+
+model Booking {
+  id            String        @id @default(uuid()) @db.Uuid
+  requirementId String        @db.Uuid
+  workerId      String        @db.Uuid
+  // Seat index makes "one seat, one booking" a database invariant.
+  seatIndex     Int
+  status        BookingStatus @default(OFFERED)
+  offerExpiresAt DateTime?
+  acceptedAt    DateTime?
+  // Set on the replacement booking, pointing at the seat it took over.
+  replacesBookingId String?   @db.Uuid @unique
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  requirement   Requirement   @relation(fields: [requirementId], references: [id])
+  worker        Worker        @relation(fields: [workerId], references: [id])
+  replaces      Booking?      @relation("Replacement", fields: [replacesBookingId], references: [id])
+  replacedBy    Booking?      @relation("Replacement")
+  events        BookingEvent[]
+  attendance    Attendance[]
+  confirmations Confirmation[]
+  disputes      Dispute[]
+
+  // "One seat, one worker" is enforced by a PARTIAL unique index that Prisma
+  // cannot express in schema — see migrations/manual/001_seat_hold_unique.sql.
+  // It must stay partial: several workers may hold OFFERED rows on one seat,
+  // but at most one may occupy it.
+  @@index([requirementId, seatIndex])
+  @@index([workerId, status])
+  @@index([status, updatedAt])
+  @@map("bookings")
+}
+
+// Append-only. Never updated, never deleted — the audit trail is the product.
+model BookingEvent {
+  id          String        @id @default(uuid()) @db.Uuid
+  bookingId   String        @db.Uuid
+  fromStatus  BookingStatus?
+  toStatus    BookingStatus
+  actorType   ActorType
+  actorId     String?       @db.Uuid
+  reason      String?
+  // Pointer to the Attendance row / media key that justified the transition.
+  evidenceRef String?
+  metadata    Json?
+  occurredAt  DateTime      @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId, occurredAt])
+  @@map("booking_events")
+}
+
+// ---------------------------------------------------------------------------
+// Attendance — the highest-risk subsystem (TRD §8)
+// ---------------------------------------------------------------------------
+
+model Attendance {
+  id        String         @id @default(uuid()) @db.Uuid
+  bookingId String         @db.Uuid
+  kind      AttendanceKind
+
+  // Evidence
+  photoObjectKey String?
+  lat            Float?
+  lng            Float?
+  accuracyM      Float?
+  code           String?
+
+  // Timing triple (TRD §8.3) — device time is evidence, server time is fact.
+  deviceWallClockAt DateTime?
+  deviceUptimeMs    BigInt?
+  serverReceivedAt  DateTime  @default(now())
+  // What the pipeline concluded the capture instant actually was.
+  derivedCaptureAt  DateTime?
+
+  // Verdict and flags are stored separately: accepted-with-flags is a real,
+  // expected outcome and ops must be able to see it.
+  verdict          AttendanceVerdict @default(PENDING_REVIEW)
+  rejectionReasons String[]          @default([])
+  flags            String[]          @default([])
+
+  distanceM        Float?
+  faceConfidence   Float?
+  integrityPayload Json?
+
+  createdAt DateTime @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  // One check-in and one check-out per booking — duplicate submissions collapse.
+  @@unique([bookingId, kind])
+  @@index([verdict, createdAt])
+  @@map("attendance")
+}
+
+// ---------------------------------------------------------------------------
+// Confirmations
+// ---------------------------------------------------------------------------
+
+model Confirmation {
+  id          String               @id @default(uuid()) @db.Uuid
+  bookingId   String               @db.Uuid
+  type        ConfirmationType
+  scheduledAt DateTime
+  channel     ConfirmationChannel?
+  sentAt      DateTime?
+  response    ConfirmationResponse @default(NO_RESPONSE)
+  respondedAt DateTime?
+  escalatedAt DateTime?
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  // Idempotency for the dispatch job: unique per booking + type.
+  @@unique([bookingId, type])
+  @@index([scheduledAt, response])
+  @@map("confirmations")
+}
+
+// ---------------------------------------------------------------------------
+// Reliability — versioned snapshots, never a mutated number
+// ---------------------------------------------------------------------------
+
+model ReliabilityScore {
+  id             String   @id @default(uuid()) @db.Uuid
+  workerId       String   @db.Uuid
+  score          Int
+  formulaVersion String
+  components     Json
+  reason         String?
+  computedAt     DateTime @default(now())
+
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@index([workerId, computedAt])
+  @@map("reliability_scores")
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+model Notification {
+  id          String              @id @default(uuid()) @db.Uuid
+  workerId    String              @db.Uuid
+  channel     NotificationChannel
+  templateId  String
+  payload     Json?
+  status      NotificationStatus  @default(QUEUED)
+  // Provider message id — webhooks are made idempotent by this (TRD §11).
+  providerRef String?
+  failureCode String?
+  sentAt      DateTime?
+  deliveredAt DateTime?
+  engagedAt   DateTime?
+  createdAt   DateTime            @default(now())
+
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@unique([channel, providerRef])
+  @@index([workerId, createdAt])
+  @@map("notifications")
+}
+
+// ---------------------------------------------------------------------------
+// Disputes
+// ---------------------------------------------------------------------------
+
+model Dispute {
+  id         String        @id @default(uuid()) @db.Uuid
+  workerId   String        @db.Uuid
+  bookingId  String?       @db.Uuid
+  target     DisputeTarget
+  reason     String
+  state      DisputeState  @default(OPEN)
+  resolution String?
+  resolvedBy String?       @db.Uuid
+  resolvedAt DateTime?
+  createdAt  DateTime      @default(now())
+
+  worker  Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  booking Booking? @relation(fields: [bookingId], references: [id])
+
+  @@index([state, createdAt])
+  @@map("disputes")
+}
+
+// ---------------------------------------------------------------------------
+// Configuration — no threshold is a constant in code (TRD §12)
+// ---------------------------------------------------------------------------
+
+model Config {
+  key         String   @id
+  value       Json
+  description String?
+  version     Int      @default(1)
+  updatedBy   String?  @db.Uuid
+  updatedAt   DateTime @updatedAt
+
+  @@map("config")
+}
+
+model FeatureFlag {
+  key         String   @id
+  enabled     Boolean  @default(false)
+  description String?
+  updatedBy   String?  @db.Uuid
+  updatedAt   DateTime @updatedAt
+
+  @@map("feature_flags")
+}
+
+model ConfigAudit {
+  id        String   @id @default(uuid()) @db.Uuid
+  key       String
+  oldValue  Json?
+  newValue  Json?
+  actorId   String?  @db.Uuid
+  changedAt DateTime @default(now())
+
+  @@index([key, changedAt])
+  @@map("config_audit")
+}
+
+// ---------------------------------------------------------------------------
+// Idempotency — the unique constraint is what makes duplicates safe (TRD §6.3)
+// ---------------------------------------------------------------------------
+
+model IdempotencyRecord {
+  key          String   @id
+  endpoint     String
+  requestHash  String
+  statusCode   Int?
+  responseBody Json?
+  // Set while the first request is still in flight; cleared on completion.
+  inFlight     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime
+
+  @@index([expiresAt])
+  @@map("idempotency_records")
+}
