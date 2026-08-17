@@ -331,7 +331,7 @@ model Booking {
   disputes      Dispute[]
 
   // "One seat, one worker" is enforced by a PARTIAL unique index that Prisma
-  // cannot express in schema — see migrations/manual/001_seat_hold_unique.sql.
+  // cannot express in schema — see prisma/manual/001_seat_hold_unique.sql.
   // It must stay partial: several workers may hold OFFERED rows on one seat,
   // but at most one may occupy it.
   @@index([requirementId, seatIndex])

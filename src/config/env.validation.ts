@@ -1,4 +1,9 @@
-import { plainToInstance } from 'class-transformer';
+// Loaded before the decorated class below is defined, so `design:type` metadata
+// exists no matter which entrypoint imports this first — main.ts, a test, or a
+// script. Without it, implicit conversion silently stops working.
+import 'reflect-metadata';
+
+import { Type, plainToInstance } from 'class-transformer';
 import { IsEnum, IsInt, IsOptional, IsString, Max, Min, validateSync } from 'class-validator';
 
 export enum Environment {
@@ -16,6 +21,9 @@ class EnvVars {
   @IsEnum(Environment)
   NODE_ENV: Environment = Environment.Development;
 
+  // Env values are always strings; the coercion is stated explicitly rather
+  // than left to implicit conversion, which depends on decorator metadata.
+  @Type(() => Number)
   @IsInt()
   @Min(1)
   @Max(65535)

@@ -11,17 +11,30 @@ it is.
 ## Prerequisites
 
 - **Node 24 LTS** — pinned in [.nvmrc](.nvmrc) (v24.19.0). With nvm: `nvm use`.
-- **Docker** — not yet installed; needed for local Postgres and Valkey, and so
-  for migrations, seeding and e2e tests.
+- **Postgres 17 and Redis** — already installed and running locally. This machine
+  has no container runtime, so rather than `docker compose up`, the services run
+  from userspace binaries under `~/.local`. Manage them with
+  [scripts/dev-services.sh](scripts/dev-services.sh).
+
+```bash
+./scripts/dev-services.sh start    # postgres :5432 · redis :6379
+./scripts/dev-services.sh status
+./scripts/dev-services.sh stop
+```
+
+Redis 7.4.2 stands in for the Valkey named in
+[docker-compose.yml](docker-compose.yml); they are protocol-compatible and BullMQ
+cannot tell them apart. The compose file remains the reference for CI and
+production, where containers are available.
 
 ## Getting started
 
 ```bash
-cp .env.example .env        # fill in secrets; thresholds do NOT go here
+cp .env.example .env             # fill in secrets; thresholds do NOT go here
 npm install
-docker compose up -d        # Postgres 17 + Valkey on 5432 / 6379
-npx prisma migrate dev      # first run creates the initial migration
-npm run db:seed             # writes config + feature-flag defaults
+./scripts/dev-services.sh start
+npx prisma migrate deploy        # schema is already migrated locally
+npm run db:seed                  # 24 config keys + 4 feature flags
 npm run start:dev
 ```
 
@@ -29,14 +42,21 @@ npm run start:dev
 - OpenAPI: `http://localhost:3000/docs` (JSON at `/docs/openapi.json`)
 - Health: `/v1/healthz`, `/v1/readyz`
 
-### One manual step after the first migration
+`/v1` comes from URI versioning alone — **do not also call
+`setGlobalPrefix('v1')`**, or every route mounts at `/v1/v1/...`. All app
+configuration lives in [src/bootstrap.ts](src/bootstrap.ts), which `main.ts` and
+the e2e suite both call so tests can never validate a differently-configured app.
 
-`prisma migrate dev --create-only`, then paste
-[`prisma/migrations/manual/001_seat_hold_unique.sql`](prisma/migrations/manual/001_seat_hold_unique.sql)
-into the generated migration before applying it. It creates the **partial**
-unique index that makes "one seat, one worker" a database invariant — Prisma
-cannot express a partial index in schema, and without it concurrent acceptance
-of the same seat can produce two bookings.
+### The seat-uniqueness index
+
+The initial migration already carries it. When regenerating migrations from
+scratch, run `prisma migrate dev --create-only` and append
+[`prisma/manual/001_seat_hold_unique.sql`](prisma/manual/001_seat_hold_unique.sql)
+before applying. It creates the **partial** unique index that makes "one seat,
+one worker" a database invariant — Prisma cannot express a partial index in
+schema, and without it concurrent acceptance of the same seat produces two
+bookings. Keep that file outside `prisma/migrations/`; Prisma treats every
+subdirectory there as a migration and fails with `P3015`.
 
 ## Layout
 
@@ -86,6 +106,12 @@ Two pipeline stages have `TODO` bodies that need an external decision before the
 can be finished: media HEAD-check against R2, and face verification (**BT-2** —
 provider choice, which also decides whether biometric data leaves the country).
 
+> **Nothing is authenticated yet.** `RolesGuard` exists and `@Roles(...)` is
+> applied, but no guard is registered globally, so those decorators enforce
+> nothing today — every route is open. Registering the guard as `APP_GUARD` is
+> part of building `auth`, and should be done fail-closed, with `@Public()` on
+> health and anything else that must stay open.
+
 ## Invariants worth not breaking
 
 1. **Never trust a client verdict.** The client's geofence opinion is stored as
@@ -105,8 +131,8 @@ provider choice, which also decides whether biometric data leaves the country).
 ## Tests
 
 ```bash
-npm test              # unit
-npm run test:e2e      # requires Postgres and Redis up
+npm test              # unit  — 12 tests
+npm run test:e2e      # e2e   —  5 tests; needs services running
 ```
 
 The concurrency tests named in TRD §15 — one seat under concurrent acceptance,

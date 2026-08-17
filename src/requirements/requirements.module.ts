@@ -7,7 +7,7 @@ import { Module } from '@nestjs/common';
  * distance (haversine, GeoService), availability and reliability score; offer
  * distribution creating OFFERED bookings per seat. Several workers may hold an
  * OFFERED row on one seat — only one may occupy it, enforced by the partial
- * unique index in prisma/migrations/manual/001_seat_hold_unique.sql.
+ * unique index in prisma/manual/001_seat_hold_unique.sql.
  */
 @Module({})
 export class RequirementsModule {}
