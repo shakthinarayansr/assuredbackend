@@ -94,11 +94,13 @@ models. `bookings` is the only module permitted to write booking state.
 | Attendance pipeline: 9 stages, accumulating verdicts | [src/attendance/pipeline/](src/attendance/pipeline/) |
 | Config service: DB-backed, Redis-cached, audited | [src/config/config.service.ts](src/config/config.service.ts) |
 | Presigned R2 uploads | [src/media/media.service.ts](src/media/media.service.ts) |
+| OTP sign-in, rotating device-bound sessions | [src/auth/](src/auth/) |
+| Worker profile: read, step-wise update | [src/workers/](src/workers/) |
 | Full data model | [prisma/schema.prisma](prisma/schema.prisma) |
 
 **Scaffolded** — module shells carrying a docblock of what belongs in them:
-`auth`, `workers`, `companies`, `requirements`, `confirmations`, `reliability`,
-`notifications`, `disputes`, `ops`. No controllers or DTOs yet, and no BullMQ
+`companies`, `requirements`, `confirmations`, `reliability`, `notifications`,
+`disputes`, `ops`. No controllers or DTOs for those yet, and no BullMQ
 processors — the queues and job ids are declared in
 [src/queue/queue.constants.ts](src/queue/queue.constants.ts), the processors are not written.
 
@@ -106,11 +108,35 @@ Two pipeline stages have `TODO` bodies that need an external decision before the
 can be finished: media HEAD-check against R2, and face verification (**BT-2** —
 provider choice, which also decides whether biometric data leaves the country).
 
-> **Nothing is authenticated yet.** `RolesGuard` exists and `@Roles(...)` is
-> applied, but no guard is registered globally, so those decorators enforce
-> nothing today — every route is open. Registering the guard as `APP_GUARD` is
-> part of building `auth`, and should be done fail-closed, with `@Public()` on
-> health and anything else that must stay open.
+### Authentication
+
+The API is **fail-closed**. `JwtAuthGuard` and `RolesGuard` are both registered
+as `APP_GUARD` in [src/auth/auth.module.ts](src/auth/auth.module.ts) and run in
+that order: the first establishes identity, the second decides whether the
+endpoint accepts it. A new controller is therefore protected whether or not its
+author remembered to think about it, and opting out takes an explicit
+`@Public()` — currently only health.
+
+Worker sign-in is OTP over phone:
+
+```
+POST /v1/auth/otp/request   { phone }                       → public, rate-limited
+POST /v1/auth/otp/verify    { phone, code, deviceId }       → public, creates the worker
+POST /v1/auth/refresh       { refreshToken, deviceId }      → public, rotates
+POST /v1/auth/logout                                        → worker
+GET  /v1/workers/me                                         → worker
+PATCH /v1/workers/me                                        → worker, @Idempotent()
+```
+
+OTP codes are stored as a **peppered HMAC**, never a plain digest: six digits is
+a millon possibilities, so an unkeyed hash of a stolen table is reversible in
+seconds. Refresh tokens are opaque, hashed at rest, device-bound and rotating;
+presenting an already-rotated token revokes the entire family, because a replay
+means the token leaked.
+
+No MSG91 credentials exist yet, so `LoggingOtpSender` writes the code to the log
+instead of sending it — and **refuses to run when `NODE_ENV=production`**, since
+a silent no-op sender there would lock every worker out with no visible failure.
 
 ## Invariants worth not breaking
 
@@ -131,8 +157,8 @@ provider choice, which also decides whether biometric data leaves the country).
 ## Tests
 
 ```bash
-npm test              # unit  — 12 tests
-npm run test:e2e      # e2e   —  5 tests; needs services running
+npm test              # unit  — 17 tests
+npm run test:e2e      # e2e   — 22 tests; needs services running
 ```
 
 The concurrency tests named in TRD §15 — one seat under concurrent acceptance,

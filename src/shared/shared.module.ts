@@ -1,4 +1,5 @@
 import { Global, Module } from '@nestjs/common';
+import { APP_INTERCEPTOR } from '@nestjs/core';
 
 import { AllExceptionsFilter } from './errors/all-exceptions.filter';
 import { GeoService } from './geo/geo.service';
@@ -20,6 +21,9 @@ import { TimeArbitrationService } from './time/time-arbitration.service';
     IdempotencyInterceptor,
     RolesGuard,
     TimeArbitrationService,
+    // Registered globally so @Idempotent() is enough to make an endpoint
+    // idempotent. It no-ops on handlers without the decorator.
+    { provide: APP_INTERCEPTOR, useExisting: IdempotencyInterceptor },
   ],
   exports: [
     AllExceptionsFilter,

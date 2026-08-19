@@ -1,11 +1,18 @@
 import { Module } from '@nestjs/common';
 
+import { WorkersController } from './workers.controller';
+import { WorkersService } from './workers.service';
+
 /**
  * profile, availability, documents, vetting (TRD §4).
  *
- * To build: get/update profile, availability template, travel distance, role
- * preferences; ops vetting transitions; WorkerDocument only under Register #4
- * branch B, gated by the DOCUMENT_UPLOAD flag.
+ * Documents remain unbuilt — they exist only under Register #4 branch B, gated
+ * by the `flags.document_upload` feature flag. Vetting is an ops action and
+ * belongs to the ops console.
  */
-@Module({})
+@Module({
+  controllers: [WorkersController],
+  providers: [WorkersService],
+  exports: [WorkersService],
+})
 export class WorkersModule {}

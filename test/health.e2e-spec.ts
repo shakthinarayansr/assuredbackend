@@ -36,16 +36,8 @@ describe('Health (e2e)', () => {
       .expect({ status: 'ok', database: 'ok' });
   });
 
-  it('serves config from the database, not from constants', async () => {
-    const response = await request(app.getHttpServer()).get('/v1/config').expect(200);
-
-    const body = response.body as {
-      values: Record<string, unknown>;
-      flags: Record<string, boolean>;
-    };
-
-    expect(body.values['attendance.geofence_radius_m']).toBe(150);
-    expect(body.flags['flags.score_visible_to_worker']).toBe(false);
+  it('requires a session for config, which is not public', async () => {
+    await request(app.getHttpServer()).get('/v1/config').expect(401);
   });
 
   it('returns a machine code, not a bare 404, for an unknown route', async () => {
